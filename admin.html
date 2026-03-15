@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Admin – Viagem com Karla</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+
+  <!-- Firebase SDKs -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, collection, getDocs, addDoc, updateDoc, deleteDoc, doc, serverTimestamp }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject }
+      from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
+    /* ============================================================
+       🔧 CONFIGURAÇÃO FIREBASE
+       Substitua pelos valores do seu projeto Firebase
+       Acesse: https://console.firebase.google.com
+       Projeto → Configurações → Adicionar app web → copie o firebaseConfig
+    ============================================================ */
+    const firebaseConfig = {
+      apiKey:            "AIzaSyDJJyGakIF3PMN95qtQNZq77xkCQEWOMdM",
+      authDomain:        "viagemcomkarla.firebaseapp.com",
+      projectId:         "viagemcomkarla",
+      storageBucket:     "viagemcomkarla.firebasestorage.app",
+      messagingSenderId: "43846585169",
+      appId:             "1:43846585169:web:77ea031824856ed7cda170"
+    };
+
+    const app  = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db   = getFirestore(app);
+    const stor = getStorage(app);
+
+    /* ---- Estado global ---- */
+    let editingId   = null;
+    let uploadedURL = null;
+    let uploadedRef = null;
+
+    /* ---- Auth ---- */
+    onAuthStateChanged(auth, user => {
+      if (user) {
+        document.getElementById('login-screen').style.display = 'none';
+        document.getElementById('app-screen').style.display  = 'block';
+        document.getElementById('user-email').textContent    = user.email;
+        loadDestinos();
+      } else {
+        document.getElementById('login-screen').style.display = 'flex';
+        document.getElementById('app-screen').style.display  = 'none';
+      }
+    });
+
+    window.fazerLogin = async () => {
+      const email = document.getElementById('email').value.trim();
+      const senha = document.getElementById('senha').value;
+      const btn   = document.getElementById('btn-login');
+      const err   = document.getElementById('login-error');
+      btn.disabled = true; btn.textContent = 'Entrando…';
+      err.textContent = '';
+      try {
+        await signInWithEmailAndPassword(auth, email, senha);
+      } catch(e) {
+        err.textContent = 'E-mail ou senha incorretos.';
+        btn.disabled = false; btn.textContent = 'Entrar';
+      }
+    };
+
+    window.fazerLogout = () => signOut(auth);
+
+    /* ---- Carregar destinos ---- */
+    async function loadDestinos() {
+      showLoading(true);
+      try {
+        const snap = await getDocs(collection(db, 'destinos'));
+        const destinos = [];
+        snap.forEach(d => destinos.push({ id: d.id, ...d.data() }));
+        renderTable(destinos);
+      } catch(e) {
+        showToast('Erro ao carregar destinos: ' + e.message, 'erro');
+      }
+      showLoading(false);
+    }
+
+    function renderTable(destinos) {
+      const tbody = document.getElementById('tbody');
+      if (destinos.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px;color:#aaa;">
+          Nenhum destino cadastrado ainda.<br>
+          <button class="btn-sm btn-primary" onclick="abrirModal()" style="margin-top:12px;">+ Adicionar primeiro destino</button>
+        </td></tr>`;
+        return;
+      }
+      tbody.innerHTML = destinos.map(d => `
+        <tr>
+          <td>
+            <div class="thumb-wrap">
+              ${d.imagemURL
+                ? `<img src="${d.imagemURL}" alt="${d.nome}" class="thumb"/>`
+                : `<div class="thumb-placeholder">📷</div>`}
+            </div>
+          </td>
+          <td><strong>${d.nome || '—'}</strong></td>
+          <td>${d.descricao || '—'}</td>
+          <td>${d.tipo ? `<span class="badge-tipo badge-${d.tipo}">${d.tipo}</span>` : '—'}</td>
+          <td>${d.destaque ? '<span class="badge-destaque">⭐ Destaque</span>' : '<span class="badge-normal">Normal</span>'}</td>
+          <td class="actions">
+            <button class="btn-sm btn-edit" onclick='editarDestino(${JSON.stringify({id:d.id,nome:d.nome,descricao:d.descricao,tipo:d.tipo,destaque:d.destaque,imagemURL:d.imagemURL,imagemPath:d.imagemPath})})'>✏️ Editar</button>
+            <button class="btn-sm btn-del"  onclick="deletarDestino('${d.id}','${d.imagemPath||''}')">🗑️ Excluir</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    /* ---- Modal ---- */
+    window.abrirModal = (dados = null) => {
+      editingId   = dados?.id   || null;
+      uploadedURL = dados?.imagemURL   || null;
+      uploadedRef = dados?.imagemPath  || null;
+
+      document.getElementById('modal-title').textContent = editingId ? 'Editar Destino' : 'Novo Destino';
+      document.getElementById('f-nome').value     = dados?.nome     || '';
+      document.getElementById('f-desc').value     = dados?.descricao|| '';
+      document.getElementById('f-tipo').value     = dados?.tipo     || 'nacional';
+      document.getElementById('f-destaque').checked = dados?.destaque || false;
+      document.getElementById('f-img').value      = '';
+      document.getElementById('preview-wrap').innerHTML = dados?.imagemURL
+        ? `<img src="${dados.imagemURL}" class="preview-img"/>` : '';
+      document.getElementById('upload-status').textContent = '';
+      document.getElementById('modal').style.display = 'flex';
+    };
+
+    window.editarDestino = (d) => abrirModal(d);
+
+    window.fecharModal = () => {
+      document.getElementById('modal').style.display = 'none';
+      editingId = uploadedURL = uploadedRef = null;
+    };
+
+    /* ---- Upload de imagem ---- */
+    window.handleImagem = async (input) => {
+      const file = input.files[0];
+      if (!file) return;
+      const status = document.getElementById('upload-status');
+      const prev   = document.getElementById('preview-wrap');
+      status.textContent = '⏳ Enviando imagem…';
+      status.style.color = '#888';
+      try {
+        const path     = `destinos/${Date.now()}_${file.name}`;
+        const storRef  = ref(stor, path);
+        await uploadBytes(storRef, file);
+        uploadedURL = await getDownloadURL(storRef);
+        uploadedRef = path;
+        prev.innerHTML = `<img src="${uploadedURL}" class="preview-img"/>`;
+        status.textContent = '✅ Imagem enviada!';
+        status.style.color = '#2ecc71';
+      } catch(e) {
+        status.textContent = '❌ Erro no upload: ' + e.message;
+        status.style.color = '#e74c3c';
+      }
+    };
+
+    /* ---- Salvar ---- */
+    window.salvarDestino = async () => {
+      const nome     = document.getElementById('f-nome').value.trim();
+      const descricao= document.getElementById('f-desc').value.trim();
+      const tipo     = document.getElementById('f-tipo').value;
+      const destaque = document.getElementById('f-destaque').checked;
+
+      if (!nome) { showToast('Informe o nome do destino.', 'erro'); return; }
+
+      const btn = document.getElementById('btn-salvar');
+      btn.disabled = true; btn.textContent = 'Salvando…';
+
+      const payload = {
+        nome, descricao, tipo, destaque,
+        imagemURL:  uploadedURL  || '',
+        imagemPath: uploadedRef  || '',
+        atualizadoEm: serverTimestamp()
+      };
+
+      try {
+        if (editingId) {
+          await updateDoc(doc(db, 'destinos', editingId), payload);
+          showToast('✅ Destino atualizado!');
+        } else {
+          await addDoc(collection(db, 'destinos'), { ...payload, criadoEm: serverTimestamp() });
+          showToast('✅ Destino adicionado!');
+        }
+        fecharModal();
+        loadDestinos();
+      } catch(e) {
+        showToast('Erro: ' + e.message, 'erro');
+      }
+      btn.disabled = false; btn.textContent = 'Salvar';
+    };
+
+    /* ---- Deletar ---- */
+    window.deletarDestino = async (id, path) => {
+      if (!confirm('Tem certeza que deseja excluir este destino?')) return;
+      try {
+        await deleteDoc(doc(db, 'destinos', id));
+        if (path) {
+          try { await deleteObject(ref(stor, path)); } catch(_){}
+        }
+        showToast('🗑️ Destino excluído.');
+        loadDestinos();
+      } catch(e) {
+        showToast('Erro ao excluir: ' + e.message, 'erro');
+      }
+    };
+
+    /* ---- Helpers ---- */
+    function showLoading(show) {
+      document.getElementById('loading').style.display = show ? 'flex' : 'none';
+    }
+
+    function showToast(msg, tipo = 'ok') {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast show ' + (tipo === 'erro' ? 'toast-erro' : 'toast-ok');
+      setTimeout(() => t.className = 'toast', 3500);
+    }
+
+    /* Enter no login */
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && document.getElementById('login-screen').style.display !== 'none') {
+        window.fazerLogin();
+      }
+    });
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --rose: #e07080; --pink: #d4758a; --navy: #3d4f8e; --navy-dark: #2d3a6e;
+      --cream: #fdf6f8;
+      --grad: linear-gradient(135deg, #b06aa8 0%, #c4698a 35%, #e0857a 70%, #eda07a 100%);
+    }
+    body { font-family: 'DM Sans', sans-serif; background: #f0f2f8; color: #2a2a3e; min-height: 100vh; }
+
+    /* LOGIN */
+    #login-screen {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh;
+      background: var(--grad);
+    }
+    .login-card {
+      background: white; border-radius: 24px; padding: 48px 44px;
+      width: 100%; max-width: 420px;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.25);
+      text-align: center;
+    }
+    .login-logo { font-family: 'Playfair Display', serif; font-size: 1.5rem; font-weight: 700; color: var(--navy-dark); margin-bottom: 4px; }
+    .login-sub  { font-size: 0.78rem; color: var(--rose); font-weight: 600; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 32px; }
+    .login-card h2 { font-size: 1.2rem; font-weight: 600; color: var(--navy-dark); margin-bottom: 24px; }
+    .login-field { margin-bottom: 16px; text-align: left; }
+    .login-field label { font-size: 0.76rem; font-weight: 700; color: var(--navy-dark); letter-spacing: 0.5px; text-transform: uppercase; display: block; margin-bottom: 6px; }
+    .login-field input {
+      width: 100%; padding: 13px 16px; border: 2px solid #e8e0f0; border-radius: 12px;
+      font-family: 'DM Sans', sans-serif; font-size: 0.95rem; color: #2a2a3e;
+      background: #fdfaff; outline: none; transition: border-color 0.2s;
+    }
+    .login-field input:focus { border-color: var(--rose); }
+    .btn-login {
+      width: 100%; background: var(--grad); color: white; border: none;
+      padding: 15px; border-radius: 12px;
+      font-family: 'DM Sans', sans-serif; font-size: 1rem; font-weight: 700;
+      cursor: pointer; margin-top: 8px;
+      box-shadow: 0 6px 24px rgba(200,100,130,0.4);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .btn-login:hover { transform: translateY(-2px); }
+    .btn-login:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+    #login-error { color: #e74c3c; font-size: 0.85rem; margin-top: 10px; min-height: 20px; }
+
+    /* APP */
+    #app-screen { display: none; }
+    .topbar {
+      background: white; padding: 14px 32px;
+      display: flex; align-items: center; justify-content: space-between;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+      position: sticky; top: 0; z-index: 50;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; }
+    .topbar-brand span { font-family: 'Playfair Display', serif; font-size: 1.1rem; font-weight: 700; color: var(--navy-dark); }
+    .topbar-brand small { font-size: 0.7rem; color: var(--rose); font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+    .topbar-right { display: flex; align-items: center; gap: 16px; }
+    #user-email { font-size: 0.85rem; color: #888; }
+    .btn-logout {
+      background: none; border: 2px solid #e0e0e0; color: #666;
+      padding: 7px 16px; border-radius: 50px; font-size: 0.82rem; font-weight: 600;
+      cursor: pointer; font-family: 'DM Sans', sans-serif; transition: all 0.2s;
+    }
+    .btn-logout:hover { border-color: var(--rose); color: var(--rose); }
+
+    .page-content { padding: 32px; max-width: 1200px; margin: 0 auto; }
+
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+    .page-header h1 { font-family: 'Playfair Display', serif; font-size: 1.7rem; font-weight: 700; color: var(--navy-dark); }
+    .page-header p { font-size: 0.88rem; color: #888; margin-top: 2px; }
+
+    .btn-primary {
+      background: var(--grad); color: white; border: none;
+      padding: 12px 26px; border-radius: 50px;
+      font-family: 'DM Sans', sans-serif; font-size: 0.9rem; font-weight: 700;
+      cursor: pointer; box-shadow: 0 4px 18px rgba(200,100,130,0.4);
+      transition: transform 0.2s, box-shadow 0.2s; white-space: nowrap;
+    }
+    .btn-primary:hover { transform: translateY(-2px); }
+
+    /* TABLE */
+    .table-wrap { background: white; border-radius: 20px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.06); }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--navy-dark); }
+    thead th { color: white; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; padding: 14px 16px; text-align: left; }
+    tbody tr { border-bottom: 1px solid #f0f0f8; transition: background 0.15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #fdfaff; }
+    tbody td { padding: 14px 16px; font-size: 0.88rem; color: #555; vertical-align: middle; }
+    .thumb-wrap { width: 64px; height: 48px; border-radius: 10px; overflow: hidden; }
+    .thumb { width: 100%; height: 100%; object-fit: cover; }
+    .thumb-placeholder { width: 64px; height: 48px; background: #f0f0f8; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; }
+    .actions { white-space: nowrap; }
+    .btn-sm { padding: 5px 12px; border-radius: 8px; font-size: 0.78rem; font-weight: 600; cursor: pointer; font-family: 'DM Sans', sans-serif; border: none; margin-right: 6px; transition: opacity 0.2s; }
+    .btn-edit { background: #eef2ff; color: var(--navy); }
+    .btn-del  { background: #fff0f0; color: #e74c3c; }
+    .btn-edit:hover, .btn-del:hover { opacity: 0.75; }
+    .badge-tipo { padding: 4px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+    .badge-nacional     { background: #ffe8ec; color: var(--rose); }
+    .badge-internacional{ background: #eef2ff; color: var(--navy); }
+    .badge-destaque { background: #fffbe6; color: #b8860b; font-size: 0.78rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+    .badge-normal   { background: #f0f0f0; color: #aaa; font-size: 0.78rem; font-weight: 600; padding: 3px 10px; border-radius: 20px; }
+
+    /* LOADING */
+    #loading {
+      display: none; align-items: center; justify-content: center;
+      padding: 60px; gap: 12px; color: #888;
+    }
+    .spinner { width: 28px; height: 28px; border: 3px solid #e8e0f0; border-top-color: var(--rose); border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* MODAL */
+    #modal {
+      display: none; position: fixed; inset: 0; z-index: 200;
+      background: rgba(0,0,0,0.5); backdrop-filter: blur(4px);
+      align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-card {
+      background: white; border-radius: 24px; padding: 40px;
+      width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto;
+      box-shadow: 0 24px 80px rgba(0,0,0,0.3);
+    }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+    .modal-header h2 { font-family: 'Playfair Display', serif; font-size: 1.4rem; font-weight: 700; color: var(--navy-dark); }
+    .btn-close { background: none; border: none; font-size: 1.4rem; cursor: pointer; color: #aaa; line-height: 1; padding: 4px; }
+    .btn-close:hover { color: var(--rose); }
+    .field { margin-bottom: 20px; }
+    .field label { font-size: 0.76rem; font-weight: 700; color: var(--navy-dark); letter-spacing: 0.5px; text-transform: uppercase; display: block; margin-bottom: 6px; }
+    .field input[type="text"], .field textarea, .field select {
+      width: 100%; padding: 12px 16px; border: 2px solid #e8e0f0; border-radius: 12px;
+      font-family: 'DM Sans', sans-serif; font-size: 0.95rem; color: #2a2a3e;
+      background: #fdfaff; outline: none; transition: border-color 0.2s;
+    }
+    .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--rose); }
+    .field textarea { resize: vertical; min-height: 80px; }
+    .checkbox-row { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+    .checkbox-row input { width: 18px; height: 18px; cursor: pointer; accent-color: var(--rose); }
+    .checkbox-row span { font-size: 0.92rem; font-weight: 500; }
+
+    /* Upload */
+    .upload-area {
+      border: 2px dashed #e8e0f0; border-radius: 14px;
+      padding: 28px; text-align: center; cursor: pointer;
+      transition: border-color 0.2s, background 0.2s; position: relative;
+    }
+    .upload-area:hover { border-color: var(--rose); background: #fdfaff; }
+    .upload-area input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+    .upload-area .ico { font-size: 2rem; margin-bottom: 8px; }
+    .upload-area p { font-size: 0.85rem; color: #888; }
+    .upload-area strong { color: var(--rose); }
+    #upload-status { font-size: 0.82rem; margin-top: 8px; min-height: 18px; }
+    .preview-img { width: 100%; max-height: 160px; object-fit: cover; border-radius: 10px; margin-top: 10px; }
+
+    .modal-footer { display: flex; gap: 12px; justify-content: flex-end; margin-top: 28px; }
+    .btn-cancel {
+      background: none; border: 2px solid #e0e0e0; color: #888;
+      padding: 11px 24px; border-radius: 50px; font-family: 'DM Sans', sans-serif;
+      font-size: 0.9rem; font-weight: 600; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-cancel:hover { border-color: #aaa; color: #555; }
+    #btn-salvar {
+      background: var(--grad); color: white; border: none;
+      padding: 12px 32px; border-radius: 50px;
+      font-family: 'DM Sans', sans-serif; font-size: 0.95rem; font-weight: 700;
+      cursor: pointer; box-shadow: 0 4px 18px rgba(200,100,130,0.4);
+      transition: transform 0.2s;
+    }
+    #btn-salvar:hover { transform: translateY(-2px); }
+    #btn-salvar:disabled { opacity: 0.7; cursor: not-allowed; transform: none; }
+
+    /* TOAST */
+    .toast {
+      position: fixed; bottom: 28px; right: 28px;
+      padding: 14px 22px; border-radius: 14px;
+      font-size: 0.88rem; font-weight: 500;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+      transform: translateY(20px); opacity: 0;
+      transition: all 0.4s; pointer-events: none;
+      max-width: 300px; z-index: 999;
+    }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast-ok   { background: var(--navy-dark); color: white; }
+    .toast-erro { background: #e74c3c; color: white; }
+
+    /* HELP BOX */
+    .help-box {
+      background: #fffbe6; border: 1.5px solid #f0d060; border-radius: 16px;
+      padding: 20px 24px; margin-bottom: 28px; font-size: 0.88rem; line-height: 1.7; color: #5a4a00;
+    }
+    .help-box strong { color: #3a3000; }
+    .help-box code { background: rgba(0,0,0,0.08); padding: 1px 6px; border-radius: 5px; font-size: 0.82rem; }
+
+    @media (max-width: 700px) {
+      .page-content { padding: 20px 16px; }
+      .topbar { padding: 14px 16px; }
+      thead th:nth-child(3), tbody td:nth-child(3) { display: none; }
+      .modal-card { padding: 28px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ============ LOGIN ============ -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">Viagem com Karla</div>
+    <div class="login-sub">Painel Administrativo</div>
+    <h2>Entrar</h2>
+    <div class="login-field">
+      <label>E-mail</label>
+      <input type="email" id="email" placeholder="seu@email.com" autocomplete="username"/>
+    </div>
+    <div class="login-field">
+      <label>Senha</label>
+      <input type="password" id="senha" placeholder="••••••••" autocomplete="current-password"/>
+    </div>
+    <button class="btn-login" id="btn-login" onclick="fazerLogin()">Entrar</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="app-screen">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div>
+        <span>Viagem com Karla</span><br>
+        <small>Painel Admin</small>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="user-email"></span>
+      <button class="btn-logout" onclick="fazerLogout()">Sair</button>
+    </div>
+  </div>
+
+  <!-- Conteúdo -->
+  <div class="page-content">
+
+    <!-- Aviso de configuração -->
+    <div class="help-box">
+      <strong>⚙️ Configuração necessária (primeira vez):</strong><br>
+      1. Crie um projeto em <a href="https://console.firebase.google.com" target="_blank" style="color:#b8860b;">console.firebase.google.com</a><br>
+      2. Ative <strong>Authentication → E-mail/senha</strong> e crie seu usuário admin<br>
+      3. Ative <strong>Firestore Database</strong> (coleção: <code>destinos</code>)<br>
+      4. Ative <strong>Storage</strong> (para as imagens)<br>
+      5. Cole as credenciais do seu app web no início do <code>&lt;script&gt;</code> deste arquivo onde diz <code>COLE_AQUI_…</code><br>
+      6. No site principal (<code>index.html</code>), cole as mesmas credenciais no bloco indicado
+    </div>
+
+    <!-- Header -->
+    <div class="page-header">
+      <div>
+        <h1>Destinos & Pacotes</h1>
+        <p>Gerencie as imagens, títulos e descrições exibidos no site</p>
+      </div>
+      <button class="btn-primary" onclick="abrirModal()">+ Novo Destino</button>
+    </div>
+
+    <!-- Tabela -->
+    <div class="table-wrap">
+      <div id="loading">
+        <div class="spinner"></div>
+        Carregando destinos…
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Imagem</th>
+            <th>Nome</th>
+            <th>Descrição</th>
+            <th>Tipo</th>
+            <th>Destaque</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ MODAL ============ -->
+<div id="modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2 id="modal-title">Novo Destino</h2>
+      <button class="btn-close" onclick="fecharModal()">✕</button>
+    </div>
+
+    <div class="field">
+      <label>Nome do Destino *</label>
+      <input type="text" id="f-nome" placeholder="Ex: Rio de Janeiro"/>
+    </div>
+
+    <div class="field">
+      <label>Descrição (pontos turísticos)</label>
+      <textarea id="f-desc" placeholder="Ex: Cristo Redentor · Pão de Açúcar · Copacabana"></textarea>
+    </div>
+
+    <div class="field">
+      <label>Tipo</label>
+      <select id="f-tipo">
+        <option value="nacional">Nacional</option>
+        <option value="internacional">Internacional</option>
+        <option value="destaque">Destaque (⭐ Mais Vendido)</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label class="checkbox-row">
+        <input type="checkbox" id="f-destaque"/>
+        <span>⭐ Marcar como destaque (aparece em seção especial)</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <label>Imagem do Destino</label>
+      <div class="upload-area">
+        <input type="file" id="f-img" accept="image/*" onchange="handleImagem(this)"/>
+        <div class="ico">🖼️</div>
+        <p><strong>Clique ou arraste</strong> uma foto aqui<br>JPG, PNG, WebP — recomendado 900×600px</p>
+      </div>
+      <div id="upload-status"></div>
+      <div id="preview-wrap"></div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="fecharModal()">Cancelar</button>
+      <button id="btn-salvar" onclick="salvarDestino()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast"></div>
+
+</body>
+</html>
